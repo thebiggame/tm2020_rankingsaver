@@ -95,9 +95,7 @@ class RankingSaver(AppConfig):
             self.enabled = False
 
     async def scores(self, section, players, teams, **kwargs):
-        if not self.enabled:
-            return
-        else:
+        if self.enabled:
             if section == 'EndMap':
                 await self.handle_scores(players, teams)
 
