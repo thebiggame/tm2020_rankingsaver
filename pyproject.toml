@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "pyplanet-thebiggame"
+version = "1.0.0"
+authors = [
+    { name="duck.", email="duck@thebiggame.org" },
+]
+description = "PyPlanet server controller plugins by theBIGGAME."
+readme = "readme.md"
+requires-python = ">=3.7"
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+
+    "Operating System :: OS Independent",
+
+    "Topic :: Games/Entertainment",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/thebiggame/tm2020_rankingsaver"
+"Bug Tracker" = "https://github.com/thebiggame/tm2020_rankingsaver/issues"
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.github",
+    "/.idea"
+]

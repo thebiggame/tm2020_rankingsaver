@@ -1,2 +1,4 @@
 # Jetbrains
 .idea
+
+*.pid

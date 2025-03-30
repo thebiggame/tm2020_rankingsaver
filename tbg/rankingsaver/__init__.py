@@ -1,8 +1,7 @@
 import json
-import time
+from datetime import datetime
 import asyncio
 import os
-import shutil
 import random
 
 from pyplanet.apps.config import AppConfig
@@ -13,7 +12,7 @@ from pyplanet.contrib.command import Command
 from pyplanet.utils.style import STRIP_ALL, style_strip
 
 
-from helpers import format_net_timespan
+from .helpers import format_net_timespan
 
 # These messages are displayed as a congratulations to the winner of each round
 # when tracking is enabled.
@@ -24,14 +23,16 @@ winner_congrats_messages = [
     'And you managed it without throwing your keyboard across the room.',
 ]
 
-class RankingSaver(AppConfig):
+class RankingSaverApp(AppConfig):
     """
-    Save RoundPoints on EndMap to DB
+    Save Rankings to JSON files.
     """
 
     game_dependencies = ['trackmania_next', 'trackmania']
     mode_dependencies = ['TimeAttack']
     app_dependencies = ['core.maniaplanet', 'core.trackmania']
+
+    namespace = 'tbg'
 
     def __init__(self, *args, **kwargs):
         """
@@ -39,7 +40,6 @@ class RankingSaver(AppConfig):
         """
         super().__init__(*args, **kwargs)
 
-        self.namespace = 'tbg'
         self.enabled = False
         self.running = False
 
@@ -121,8 +121,11 @@ class RankingSaver(AppConfig):
         if self.enabled:
             if section == 'EndMap':
                 winner = await self.handle_scores(players, teams)
-                message = (f'$o$20a tBG $fff - Congratulations to $z{winner.get("name")}$fff! '
-                           f'$i{random.choice(winner_congrats_messages)}$z')
+                if winner is not None:
+                    message = (f'$o$20a tBG $fff - Congratulations to $z{winner["player"].nickname}$fff! '
+                               f'$i{random.choice(winner_congrats_messages)}$z')
+                else:
+                    message = '$o$20a tBG $fff - Congratulations to... wait, nobody completed the map? Pff.$fff'
                 await self.instance.chat(message)
 
                 message = '$o$20a tBG $fff - Map scores saved successfully.$z'
@@ -137,7 +140,7 @@ class RankingSaver(AppConfig):
         Returns:
             dict: The winning player.
         """
-        timestr = time.strftime("%Y-%m-%d_%H-%M-%S")
+        timestr = datetime.utcnow().isoformat()
 
         # Create base dictionary (this will form the JSON output later)
         match_state = {
@@ -167,13 +170,15 @@ class RankingSaver(AppConfig):
                 match_player_invalid_time_bucket.append(player)
 
         # Append the invalid times to the end of the ranking, so that they are dealt with last.
-        match_player_bucket.append(match_player_invalid_time_bucket)
+        for player in match_player_invalid_time_bucket:
+            match_player_bucket.append(player)
 
 
-        with open(f"matchresults/matchresults_{timestr}.html", 'a', encoding="utf-8") as match_file:
+        with open(f"matchresults/matchresults_{timestr}.json", 'w', encoding="utf-8") as match_file:
+            player_ptr = 0
             rank_ptr = 1
             racer_results = []
-            for k, player in match_player_bucket:
+            for player in match_player_bucket:
                 # Initialise a new Racer.
                 result = {
                     'Nick': style_strip(player['player'].nickname, STRIP_ALL),
@@ -182,20 +187,26 @@ class RankingSaver(AppConfig):
 
                 # best_race_time is stored in milliseconds.
                 best_race_time = int(player.get('best_race_time'))
-                previous_record = match_player_bucket[k - 1]
+                previous_record = match_player_bucket[player_ptr - 1]
                 # Only write a time to the output if a valid time was set by the racer.
                 if best_race_time not in [None, -1, 0]:
-                    if best_race_time == previous_record.get('best_race_time'):
+                    if previous_record is not None and best_race_time == previous_record.get('best_race_time'):
                         # It's a tie.
                         # Set the rank of this player to the same as the previous player
                         # (i.e 1, 2, _2_, 4)
-                        result['Rank'] = racer_results[k-1]['Rank'] - 1
+                        if 0 <= (player_ptr - 1) <= len(racer_results):
+                            result['Rank'] = racer_results[player_ptr - 1]['Rank'] - 1
+                        else:
+                            # Tied for first!
+                            result['Rank'] = 1
 
                     # Only write a time if one has been set.
                     result['BestTime'] = format_net_timespan(best_race_time)
 
                 # Nudge the rank pointer on for the next Racer.
                 rank_ptr += 1
+
+                # Also nudge the player access pointer on.
 
                 # Finally, write the racer to the main results array.
                 racer_results.append(result)
