@@ -121,7 +121,7 @@ class RankingSaver(AppConfig):
         if self.enabled:
             if section == 'EndMap':
                 winner = await self.handle_scores(players, teams)
-                message = (f'$o$20a tBG $fff - Congratulations to $z{winner.get('name')}$fff! '
+                message = (f'$o$20a tBG $fff - Congratulations to $z{winner.get("name")}$fff! '
                            f'$i{random.choice(winner_congrats_messages)}$z')
                 await self.instance.chat(message)
 
