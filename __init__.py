@@ -3,6 +3,7 @@ import time
 import asyncio
 import os
 import shutil
+import random
 
 from pyplanet.apps.config import AppConfig
 from pyplanet.apps.core.trackmania import callbacks as tm_signals
@@ -14,6 +15,14 @@ from pyplanet.utils.style import STRIP_ALL, style_strip
 
 from helpers import format_net_timespan
 
+# These messages are displayed as a congratulations to the winner of each round
+# when tracking is enabled.
+winner_congrats_messages = [
+    'Maximum BIGGAMER points for you!',
+    'Your Sunday morning display of speed impresses us.',
+    'Seriously fast stuff.',
+    'And you managed it without throwing your keyboard across the room.',
+]
 
 class RankingSaver(AppConfig):
     """
@@ -30,10 +39,9 @@ class RankingSaver(AppConfig):
         """
         super().__init__(*args, **kwargs)
 
-        self.namespace = 'match'
+        self.namespace = 'tbg'
         self.enabled = False
         self.running = False
-        self.list_view = None
 
     async def on_start(self):
         """
@@ -43,95 +51,159 @@ class RankingSaver(AppConfig):
         # Init settings.
 
         await self.instance.permission_manager.register(
-            'start', 'Start MatchSaving command', app=self, min_level=2)
+            'match', 'Manage Tournament Tracking', app=self, min_level=2)
 
         # Listen to signals.
         self.context.signals.listen(tm_signals.scores, self.scores)
         self.context.signals.listen(mp_signals.map.map_end, self.map_end)
 
-        # Start MatchSaving HTML on command
+        # Register commands
+        # Start match logging
         await self.instance.command_manager.register(
             Command(command='start', aliases=['mstart'], namespace=self.namespace, target=self.match_start,
-                    perms='match_results:start', admin=True, description='Start Match Recording').add_param('',
-                                                                                                                nargs='*',
-                                                                                                                type=str,
-                                                                                                                required=False,
-                                                                                                                help='Start Match Recording'))
+                    perms='tbg:match', admin=True, description='Start Match Recording')
+            .add_param('',
+                       nargs='*',
+                       type=str,
+                       required=False,
+                       help='Start Match Recording'))
 
-        # Stop MatchSaving HTML on command
+        # Stop match logging
         await self.instance.command_manager.register(
             Command(command='stop', aliases=['mstop'], namespace=self.namespace, target=self.match_stop,
-                    perms='match_results:start', admin=True, description='Stop Match Recording').add_param('',
-                                                                                                               nargs='*',
-                                                                                                               type=str,
-                                                                                                               required=False,
-                                                                                                               help='Stop Match Recording'))
+                    perms='tbg:match', admin=True, description='Stop Match Recording')
+            .add_param('',
+                       nargs='*',
+                       type=str,
+                       required=False,
+                       help='Stop Match Recording'))
 
     async def match_start(self, player, data, **kwargs):
-        message = '$o$20a tBG $fff - BIGGAMER tournament tracking will begin after map resets. $20aGLHF!$z'
-        # make a copy of the matchresults to work with
+        """
+        Called when the start command is given.
+        """
+        # ensure the matchresults directory exists
         filename = "matchresults/matchresults.json"
+
         os.makedirs(os.path.dirname(filename), exist_ok=True)
-        if not os.path.exists(filename):
-            open(filename, 'w').close()
-        src = "matchresults/matchresults.json"
-        dst = "matchresults/matchresults_{}.html".format(time.strftime("%Y-%m-%d_%H-%M-%S"))
-        shutil.copy(src, dst)
-        os.remove('matchresults/matchresults.json')
         self.enabled = True
         self.running = True
+
+        message = '$o$20a tBG $fff - BIGGAMER tournament tracking will begin after map resets. $20aGLHF!$z'
         await self.instance.chat(message)
+
         await asyncio.sleep(5)
         await self.instance.gbx('RestartMap')
 
     async def match_stop(self, player, data, **kwargs):
+        """
+        Called when the stop command is given.
+        """
         if self.enabled and self.running:
             message = '$o$20a tBG $fff - Tournament will end at the conclusion of this map.$z'
             await self.instance.chat(message)
             self.running = False
 
     async def map_end(self, map):
+        """
+        Callback: map ended.
+        """
         if not self.running:
             self.enabled = False
+            message = '$o$20a tBG $fff - Tournament tracking concluded. Go get a nice Sunday morning cup of tea!$z'
+            await self.instance.chat(message)
 
-    async def scores(self, section, players, teams, **kwargs):
+    async def scores(self, section: str, players: dict, teams: dict, **kwargs):
+        """
+        Callback: New scores are available
+        (usually because the round has ended and the podium is about to be displayed).
+        """
         if self.enabled:
             if section == 'EndMap':
-                await self.handle_scores(players, teams)
+                winner = await self.handle_scores(players, teams)
+                message = (f'$o$20a tBG $fff - Congratulations to $z{winner.get('name')}$fff! '
+                           f'$i{random.choice(winner_congrats_messages)}$z')
+                await self.instance.chat(message)
 
-    async def handle_scores(self, players, teams):
+                message = '$o$20a tBG $fff - Map scores saved successfully.$z'
+                await self.instance.chat(message)
+
+
+    async def handle_scores(self, players: dict, teams: dict) -> dict:
+        """
+        handle_scores dumps the current state of players to a JSON file on disk.
+        This function only works properly in time attack.
+
+        Returns:
+            dict: The winning player.
+        """
         timestr = time.strftime("%Y-%m-%d_%H-%M-%S")
 
-        # Create base dictionary
-        matchState = {
+        # Create base dictionary (this will form the JSON output later)
+        match_state = {
             "TrackName": style_strip(self.instance.map_manager.current_map.name, STRIP_ALL),
             "RacedAtUtc": timestr,
             "RacerResults": [
-                # Nick (string / null), BestTime (.net format duration), Rank (int)
+                # Nick (string / null)
+                # BestTime (.net format duration)
+                # Rank (int)
             ],
         }
 
-        with open('matchresults/matchresults.json', 'a', encoding="utf-8") as myFile:
-            rank = 1
-            racerResults = []
-            for player in players:
+        # This is presently done as two separate for loops because I'm lazy.
+        # It should be trivial to move this first filter out to the main
+        # sorting loop if it becomes a performance bottleneck.
+
+        # Firstly we need to sort the players with invalid (unset times) out
+        # so that they can be put to the back of the queue.
+        match_player_bucket = []
+        match_player_invalid_time_bucket = []
+        for player in sorted(players, key=lambda p: p['best_race_time']):
+            if player['best_race_time'] not in [-1, 0]:
+                # Player has a valid race time,
+                match_player_bucket.append(player)
+            else:
+                # Player did not set a time.
+                match_player_invalid_time_bucket.append(player)
+
+        # Append the invalid times to the end of the ranking, so that they are dealt with last.
+        match_player_bucket.append(match_player_invalid_time_bucket)
+
+
+        with open(f"matchresults/matchresults_{timestr}.html", 'a', encoding="utf-8") as match_file:
+            rank_ptr = 1
+            racer_results = []
+            for k, player in match_player_bucket:
                 # Initialise a new Racer.
                 result = {
                     'Nick': style_strip(player['player'].nickname, STRIP_ALL),
-                    'Rank': rank
+                    'Rank': rank_ptr
                 }
 
-                # Nudge the rank on for the next Racer.
-                rank += 1
+                # best_race_time is stored in milliseconds.
+                best_race_time = int(player.get('best_race_time'))
+                previous_record = match_player_bucket[k - 1]
+                # Only write a time to the output if a valid time was set by the racer.
+                if best_race_time not in [None, -1, 0]:
+                    if best_race_time == previous_record.get('best_race_time'):
+                        # It's a tie.
+                        # Set the rank of this player to the same as the previous player
+                        # (i.e 1, 2, _2_, 4)
+                        result['Rank'] = racer_results[k-1]['Rank'] - 1
 
-                # best_racetime is in ms.
-                if player['best_race_time'] != -1:
                     # Only write a time if one has been set.
-                    result['BestTime'] = format_net_timespan(int(player['best_race_time']))
+                    result['BestTime'] = format_net_timespan(best_race_time)
+
+                # Nudge the rank pointer on for the next Racer.
+                rank_ptr += 1
 
                 # Finally, write the racer to the main results array.
-                racerResults.append(result)
+                racer_results.append(result)
+
 
             # Write the current state of play to the match results file.
-            matchState['RacerResults'] = racerResults
-            myFile.write(json.dumps(matchState))
+            match_state['RacerResults'] = racer_results
+            match_file.write(json.dumps(match_state))
+
+        # Finally, return the player that came first.
+        return match_player_bucket[0]
