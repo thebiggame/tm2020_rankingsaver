@@ -1,18 +1,20 @@
-import json
-from datetime import datetime
 import asyncio
+import json
+import logging
 import os
 import random
+from datetime import datetime
+from typing import Optional
 
 from pyplanet.apps.config import AppConfig
-from pyplanet.apps.core.trackmania import callbacks as tm_signals
 from pyplanet.apps.core.maniaplanet import callbacks as mp_signals
-
+from pyplanet.apps.core.trackmania import callbacks as tm_signals
 from pyplanet.contrib.command import Command
 from pyplanet.utils.style import STRIP_ALL, style_strip
 
-
 from .helpers import format_net_timespan
+
+logger = logging.getLogger(__name__)
 
 # These messages are displayed as a congratulations to the winner of each round
 # when tracking is enabled.
@@ -22,6 +24,7 @@ winner_congrats_messages = [
     'Seriously fast stuff.',
     'And you managed it without throwing your keyboard across the room.',
 ]
+
 
 class RankingSaverApp(AppConfig):
     """
@@ -89,7 +92,7 @@ class RankingSaverApp(AppConfig):
         self.enabled = True
         self.running = True
 
-        message = '$o$20a tBG $fff - BIGGAMER tournament tracking will begin after map resets. $20aGLHF!$z'
+        message = '$o$20atBG $fff- BIGGAMER tournament tracking will begin after map resets. $20aGLHF!$z'
         await self.instance.chat(message)
 
         await asyncio.sleep(5)
@@ -100,7 +103,7 @@ class RankingSaverApp(AppConfig):
         Called when the stop command is given.
         """
         if self.enabled and self.running:
-            message = '$o$20a tBG $fff - Tournament will end at the conclusion of this map.$z'
+            message = '$o$20atBG $fff- Tournament will end at the conclusion of this map.$z'
             await self.instance.chat(message)
             self.running = False
 
@@ -110,7 +113,7 @@ class RankingSaverApp(AppConfig):
         """
         if not self.running:
             self.enabled = False
-            message = '$o$20a tBG $fff - Tournament tracking concluded. Go get a nice Sunday morning cup of tea!$z'
+            message = '$o$20atBG $fff- Tournament tracking concluded. Go get a nice Sunday morning cup of tea!$z'
             await self.instance.chat(message)
 
     async def scores(self, section: str, players: dict, teams: dict, **kwargs):
@@ -120,101 +123,144 @@ class RankingSaverApp(AppConfig):
         """
         if self.enabled:
             if section == 'EndMap':
-                winner = await self.handle_scores(players, teams)
+                round_result = await render_map_result(self.instance.map_manager.current_map.name, players, teams)
+                winner = get_round_result_winner(round_result)
                 if winner is not None:
-                    message = (f'$o$20a tBG $fff - Congratulations to $z{winner["player"].nickname}$fff! '
+                    message = (f'$o$20atBG $fff- Congratulations to $z{winner}$fff! '
                                f'$i{random.choice(winner_congrats_messages)}$z')
                 else:
-                    message = '$o$20a tBG $fff - Congratulations to... wait, nobody completed the map? Pff.$fff'
+                    message = '$o$20atBG $fff- Congratulations to... wait, nobody completed the map? Pff.$fff'
                 await self.instance.chat(message)
 
-                message = '$o$20a tBG $fff - Map scores saved successfully.$z'
+                try:
+                    await update_matchresult(round_result)
+                    message = '$o$20atBG $fff- Map scores saved successfully.$z'
+                except Exception as e:
+                    logging.exception(e)
+                    message = '$o$20atBG $fff- $f00An error occurred saving the match results.$z'
+                    await self.instance.chat(message)
+                    raise e
+
                 await self.instance.chat(message)
 
 
-    async def handle_scores(self, players: dict, teams: dict) -> dict:
-        """
-        handle_scores dumps the current state of players to a JSON file on disk.
-        This function only works properly in time attack.
+async def get_round_result_winner(round_result: dict) -> Optional[str]:
+    """
+    get_round_result_winner returns the player with the fastest valid time.
+    If there are no valid times, this returns None.
 
-        Returns:
-            dict: The winning player.
-        """
-        timestr = datetime.utcnow().isoformat()
+    Returns:
+        str: The nickname of the winning player, or None if there are no valid times.
+    """
+    if round_result.get('RacerResults', None) is not None and len(round_result['RacerResults']) > 0:
+        if round_result['RacerResults'][0].get('BestTime', None) is not None:
+            return round_result.get('RacerResults')[0].get('Nick', "Unknown Racer")
 
-        # Create base dictionary (this will form the JSON output later)
-        match_state = {
-            "TrackName": style_strip(self.instance.map_manager.current_map.name, STRIP_ALL),
-            "RacedAtUtc": timestr,
-            "RacerResults": [
-                # Nick (string / null)
-                # BestTime (.net format duration)
-                # Rank (int)
-            ],
+    # There are no valid times.
+    return None
+
+
+async def render_map_result(map_name: str, players: dict, teams: dict) -> dict:
+    """
+    render_map_result returns a correctly formatted dictionary ready to be saved to disk.
+    This function only works properly in time attack.
+
+    Returns:
+        dict: The RoundResult object.
+    """
+    timestr = datetime.utcnow().isoformat()
+
+    # Create base dictionary (this will form the JSON output later)
+    round_result = {
+        "TrackName": style_strip(map_name, STRIP_ALL),
+        "RacedAtUtc": timestr,
+        "RacerResults": [
+            # Nick (string / null)
+            # BestTime (.net format duration)
+            # Rank (int)
+        ],
+    }
+
+    # This is presently done as two separate for loops because I'm lazy.
+    # It should be trivial to move this first filter out to the main
+    # sorting loop if it becomes a performance bottleneck.
+
+    # Firstly we need to sort the players with invalid (unset times) out
+    # so that they can be put to the back of the queue.
+    match_player_bucket = []
+    match_player_invalid_time_bucket = []
+    for player in sorted(players, key=lambda p: p['best_race_time']):
+        if player['best_race_time'] not in [-1, 0]:
+            # Player has a valid race time,
+            match_player_bucket.append(player)
+        else:
+            # Player did not set a time.
+            match_player_invalid_time_bucket.append(player)
+
+    # Append the invalid times to the end of the ranking, so that they are dealt with last.
+    for player in match_player_invalid_time_bucket:
+        match_player_bucket.append(player)
+
+    player_ptr = 0
+    rank_ptr = 1
+    racer_results = []
+    for player in match_player_bucket:
+        # Initialise a new Racer.
+        result = {
+            'Nick': style_strip(player['player'].nickname, STRIP_ALL),
+            'Rank': rank_ptr
         }
 
-        # This is presently done as two separate for loops because I'm lazy.
-        # It should be trivial to move this first filter out to the main
-        # sorting loop if it becomes a performance bottleneck.
+        # best_race_time is stored in milliseconds.
+        best_race_time = int(player.get('best_race_time'))
+        previous_record = match_player_bucket[player_ptr - 1]
+        # Only write a time to the output if a valid time was set by the racer.
+        if best_race_time not in [None, -1, 0]:
+            if previous_record is not None and best_race_time == previous_record.get('best_race_time'):
+                # It's a tie.
+                # Set the rank of this player to the same as the previous player
+                # (i.e 1, 2, _2_, 4)
+                if 0 <= (player_ptr - 1) <= len(racer_results):
+                    result['Rank'] = racer_results[player_ptr - 1]['Rank']
+                else:
+                    # Tied for first!
+                    result['Rank'] = 1
 
-        # Firstly we need to sort the players with invalid (unset times) out
-        # so that they can be put to the back of the queue.
-        match_player_bucket = []
-        match_player_invalid_time_bucket = []
-        for player in sorted(players, key=lambda p: p['best_race_time']):
-            if player['best_race_time'] not in [-1, 0]:
-                # Player has a valid race time,
-                match_player_bucket.append(player)
-            else:
-                # Player did not set a time.
-                match_player_invalid_time_bucket.append(player)
+            # Only write a time if one has been set.
+            result['BestTime'] = format_net_timespan(best_race_time)
 
-        # Append the invalid times to the end of the ranking, so that they are dealt with last.
-        for player in match_player_invalid_time_bucket:
-            match_player_bucket.append(player)
+        # Nudge the rank pointer on for the next Racer.
+        rank_ptr += 1
 
+        # Also nudge the player access pointer on.
+        player_ptr += 1
 
-        with open(f"matchresults/matchresults_{timestr}.json", 'w', encoding="utf-8") as match_file:
-            player_ptr = 0
-            rank_ptr = 1
-            racer_results = []
-            for player in match_player_bucket:
-                # Initialise a new Racer.
-                result = {
-                    'Nick': style_strip(player['player'].nickname, STRIP_ALL),
-                    'Rank': rank_ptr
-                }
+        # Finally, write the racer to the main results array.
+        racer_results.append(result)
 
-                # best_race_time is stored in milliseconds.
-                best_race_time = int(player.get('best_race_time'))
-                previous_record = match_player_bucket[player_ptr - 1]
-                # Only write a time to the output if a valid time was set by the racer.
-                if best_race_time not in [None, -1, 0]:
-                    if previous_record is not None and best_race_time == previous_record.get('best_race_time'):
-                        # It's a tie.
-                        # Set the rank of this player to the same as the previous player
-                        # (i.e 1, 2, _2_, 4)
-                        if 0 <= (player_ptr - 1) <= len(racer_results):
-                            result['Rank'] = racer_results[player_ptr - 1]['Rank'] - 1
-                        else:
-                            # Tied for first!
-                            result['Rank'] = 1
+        # Write the current state of play to the match results file.
+        round_result['RacerResults'] = racer_results
 
-                    # Only write a time if one has been set.
-                    result['BestTime'] = format_net_timespan(best_race_time)
-
-                # Nudge the rank pointer on for the next Racer.
-                rank_ptr += 1
-
-                # Also nudge the player access pointer on.
-
-                # Finally, write the racer to the main results array.
-                racer_results.append(result)
+    return round_result
 
 
-            # Write the current state of play to the match results file.
-            match_state['RacerResults'] = racer_results
-            match_file.write(json.dumps(match_state))
+async def update_matchresult(round_result: dict):
+    """
+    update_matchresult updates today's matchresult file with the given round_result.
+    """
+    today = datetime.today().strftime('%Y-%m-%d')
+    # Open today's file.
+    with open(f"matchresults/matchresults_{today}.json", 'r', encoding="utf-8") as match_file:
+        data = json.load(match_file)
 
-        # Finally, return the player that came first.
-        return match_player_bucket[0]
+    if data is None:
+        # Create new basic data structure.
+        data = {
+            "RoundResults": [],
+        }
+
+    data['RoundResults'].append(round_result)
+
+    # Overwrite today's matchresults file.
+    with open(f"matchresults/match_{today}.json", 'w', encoding="utf-8") as match_file:
+        match_file.write(json.dumps(data))
