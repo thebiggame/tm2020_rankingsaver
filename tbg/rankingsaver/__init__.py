@@ -1,5 +1,4 @@
 import asyncio
-import json
 import logging
 import os
 import random
@@ -12,6 +11,7 @@ from pyplanet.apps.core.trackmania import callbacks as tm_signals
 from pyplanet.contrib.command import Command
 from pyplanet.utils.style import STRIP_ALL, style_strip
 
+from .fileio import update_matchresult
 from .helpers import format_net_timespan
 
 logger = logging.getLogger(__name__)
@@ -242,25 +242,3 @@ async def render_map_result(map_name: str, players: dict, teams: dict) -> dict:
         round_result['RacerResults'] = racer_results
 
     return round_result
-
-
-async def update_matchresult(round_result: dict):
-    """
-    update_matchresult updates today's matchresult file with the given round_result.
-    """
-    today = datetime.today().strftime('%Y-%m-%d')
-    # Open today's file.
-    with open(f"matchresults/matchresults_{today}.json", 'r', encoding="utf-8") as match_file:
-        data = json.load(match_file)
-
-    if data is None:
-        # Create new basic data structure.
-        data = {
-            "RoundResults": [],
-        }
-
-    data['RoundResults'].append(round_result)
-
-    # Overwrite today's matchresults file.
-    with open(f"matchresults/match_{today}.json", 'w', encoding="utf-8") as match_file:
-        match_file.write(json.dumps(data))
