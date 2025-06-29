@@ -64,7 +64,7 @@ class RankingSaverApp(AppConfig):
         # Start match logging
         await self.instance.command_manager.register(
             Command(command='start', aliases=['mstart'], namespace=self.namespace, target=self.match_start,
-                    perms='tbg:match', admin=True, description='Start Match Recording')
+                    perms='rankingsaver:match', admin=True, description='Start Match Recording')
             .add_param('',
                        nargs='*',
                        type=str,
@@ -74,7 +74,7 @@ class RankingSaverApp(AppConfig):
         # Stop match logging
         await self.instance.command_manager.register(
             Command(command='stop', aliases=['mstop'], namespace=self.namespace, target=self.match_stop,
-                    perms='tbg:match', admin=True, description='Stop Match Recording')
+                    perms='rankingsaver:match', admin=True, description='Stop Match Recording')
             .add_param('',
                        nargs='*',
                        type=str,
@@ -124,13 +124,16 @@ class RankingSaverApp(AppConfig):
         if self.enabled:
             if section == 'EndMap':
                 round_result = await render_map_result(self.instance.map_manager.current_map.name, players, teams)
-                winner = get_round_result_winner(round_result)
+                winner = await get_round_result_winner(round_result)
                 if winner is not None:
                     message = (f'$o$20atBG $fff- Congratulations to $z{winner}$fff! '
                                f'$i{random.choice(winner_congrats_messages)}$z')
                 else:
                     message = '$o$20atBG $fff- Congratulations to... wait, nobody completed the map? Pff.$fff'
                 await self.instance.chat(message)
+
+                logging.info("Round Results:")
+                logging.info(round_result)
 
                 try:
                     await update_matchresult(round_result)
