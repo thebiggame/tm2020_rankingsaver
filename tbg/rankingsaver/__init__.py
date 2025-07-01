@@ -11,7 +11,7 @@ from pyplanet.apps.core.trackmania import callbacks as tm_signals
 from pyplanet.contrib.command import Command
 from pyplanet.utils.style import STRIP_ALL, style_strip
 
-from .fileio import update_matchresult
+from .fileio import update_matchresult, dump_mapend_raw
 from .helpers import format_net_timespan
 
 logger = logging.getLogger(__name__)
@@ -23,6 +23,7 @@ winner_congrats_messages = [
     'Your Sunday morning display of speed impresses us.',
     'Seriously fast stuff.',
     'And you managed it without throwing your keyboard across the room.',
+    'Your victory shall be remembered as fondly as Gribley\'s Eiffel Tower model.',
 ]
 
 
@@ -111,10 +112,12 @@ class RankingSaverApp(AppConfig):
         """
         Callback: map ended.
         """
-        if not self.running:
+        if not self.running and self.enabled:
             self.enabled = False
             message = '$o$20atBG $fff- Tournament tracking concluded. Go get a nice Sunday morning cup of tea!$z'
             await self.instance.chat(message)
+
+
 
     async def scores(self, section: str, players: dict, teams: dict, **kwargs):
         """
@@ -123,24 +126,32 @@ class RankingSaverApp(AppConfig):
         """
         if self.enabled:
             if section == 'EndMap':
-                round_result = await render_map_result(self.instance.map_manager.current_map.name, players, teams)
-                winner = await get_round_result_winner(round_result)
-                if winner is not None:
-                    message = (f'$o$20atBG $fff- Congratulations to $z{winner}$fff! '
-                               f'$i{random.choice(winner_congrats_messages)}$z')
-                else:
-                    message = '$o$20atBG $fff- Congratulations to... wait, nobody completed the map? Pff.$fff'
-                await self.instance.chat(message)
-
-                logging.info("Round Results:")
-                logging.info(round_result)
-
+                # In the interest of safety, dump player and team information to disk.
                 try:
+                    await dump_mapend_raw(players, teams)
+                except Exception as e:
+                    logging.exception(e)
+                    message = '$o$20atBG $fff- $f00A critical error occurred saving the map results. Please await further instructions from the crew.$z'
+                    await self.instance.chat(message)
+                    raise e
+                try:
+                    round_result = await render_map_result(self.instance.map_manager.current_map.name, players, teams)
+                    winner = await get_round_result_winner(round_result)
+                    if winner is not None:
+                        message = (f'$o$20atBG $fff- Congratulations to $z{winner}$fff! '
+                                   f'$i{random.choice(winner_congrats_messages)}$z')
+                    else:
+                        message = '$o$20atBG $fff- Congratulations to... wait, nobody completed the map? Pff.$fff'
+                    await self.instance.chat(message)
+
+                    logging.info("Round Results:")
+                    logging.info(round_result)
+
                     await update_matchresult(round_result)
                     message = '$o$20atBG $fff- Map scores saved successfully.$z'
                 except Exception as e:
                     logging.exception(e)
-                    message = '$o$20atBG $fff- $f00An error occurred saving the match results.$z'
+                    message = '$o$20atBG $fff- An issue occurred saving the match results, but the raw data was saved successfully - don\'t panic!$z'
                     await self.instance.chat(message)
                     raise e
 
